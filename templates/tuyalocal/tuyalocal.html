@@ -1,0 +1,94 @@
+<div class="row"><div class="col-md-9">
+ <h3>Tuya Local — устройства</h3>
+
+ <form method="post" action="?" class="form-inline" style="margin-bottom:16px;">
+  <input type="hidden" name="view_mode" value="update_settings"/>
+  Опрос, сек: <input type="text" name="api_poll" value="<#API_POLL#>" class="form-control" style="width:80px"/>
+  <button type="submit" class="btn btn-primary">Сохранить</button>
+  <a href="?view_mode=refresh" class="btn btn-default"><i class="glyphicon glyphicon-refresh"></i> Обновить</a>
+ </form>
+
+ <div class="panel panel-default">
+  <div class="panel-heading"><b>[#if EDITING="1"#]Редактирование устройства #<#F_ID#>[#else#]Добавить устройство Tuya[#endif#]</b></div>
+  <div class="panel-body">
+   <form method="post" action="?" class="form-horizontal">
+    <input type="hidden" name="view_mode" value="device_save"/>
+    <input type="hidden" name="f_id" value="<#F_ID#>"/>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Имя</label>
+     <div class="col-md-6"><input type="text" name="f_name" value="<#F_NAME#>" class="form-control" placeholder="напр. Термостат бани"/></div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Категория</label>
+     <div class="col-md-6">
+      <input type="text" name="f_category" value="<#F_CATEGORY#>" class="form-control" placeholder="wk"/>
+      <span class="help-block"><small>профиль свойств (DP-карта). Сейчас поддержан: <b>wk</b> — терморегулятор.</small></span>
+     </div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">IP в локальной сети</label>
+     <div class="col-md-6"><input type="text" name="f_ip" value="<#F_IP#>" class="form-control" placeholder="напр. 192.168.1.50"/></div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Device ID</label>
+     <div class="col-md-6"><input type="text" name="f_devid" value="<#F_DEVID#>" class="form-control" autocomplete="off" placeholder="ID устройства Tuya"/></div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Local Key</label>
+     <div class="col-md-6">
+      <input type="text" name="f_localkey" value="" class="form-control" autocomplete="off" placeholder="при редактировании пустое = не менять"/>
+      <span class="help-block"><small>локальный ключ берётся из облака Tuya IoT (привязан к устройству).</small></span>
+     </div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Версия протокола</label>
+     <div class="col-md-3">
+      <select name="f_version" class="form-control">
+       <option[#if F_VERSION="3.1"#] selected[#endif#]>3.1</option>
+       <option[#if F_VERSION="3.2"#] selected[#endif#]>3.2</option>
+       <option[#if F_VERSION="3.3"#] selected[#endif#]>3.3</option>
+       <option[#if F_VERSION="3.4"#] selected[#endif#]>3.4</option>
+       <option[#if F_VERSION="3.5"#] selected[#endif#]>3.5</option>
+      </select>
+     </div>
+    </div>
+    <div class="form-group">
+     <div class="col-md-offset-3 col-md-6">
+      <button type="submit" class="btn btn-primary">[#if EDITING="1"#]Сохранить изменения[#else#]Добавить[#endif#]</button>
+      [#if EDITING="1"#]<a href="?" class="btn btn-default">Отмена</a>[#endif#]
+     </div>
+    </div>
+   </form>
+  </div>
+ </div>
+
+ <h4>Устройства (<#DEVICES_COUNT#>)</h4>
+ <table class="table table-striped">
+  <thead><tr><th>Имя</th><th>Категория</th><th>IP</th><th>Device ID</th><th>Ver</th><th></th></tr></thead>
+  <tbody>
+  [#begin DEVICES#]<tr>
+   <td><b>[#NAME#]</b></td><td>[#CATEGORY#]</td><td>[#IP#]</td><td><small>[#DEV_ID#]</small></td><td>[#VERSION#]</td>
+   <td>
+    <a href="?edit=[#ID#]" class="btn btn-xs btn-default"><i class="glyphicon glyphicon-pencil"></i></a>
+    <a href="?view_mode=device_delete&amp;id=[#ID#]" class="btn btn-xs btn-danger" onclick="return confirm('Удалить устройство [#NAME#]?');"><i class="glyphicon glyphicon-trash"></i></a>
+   </td>
+  </tr>[#end DEVICES#]
+  </tbody>
+ </table>
+</div></div>
+
+<script>
+/* «Сайт модуля» в шапке панели задаётся глобально (panel.html) на connect.smartliving.ru.
+   Для этого модуля перенаправляем ссылку на наш репозиторий. */
+(function () {
+  function fixSiteLink() {
+    var links = document.querySelectorAll('a[href*="connect.smartliving.ru/addons/name/tuyalocal"]');
+    for (var i = 0; i < links.length; i++) {
+      links[i].href = "https://github.com/ToteMeiSter/majordomo-tuyalocal";
+      links[i].target = "_blank";
+    }
+  }
+  if (document.readyState !== "loading") fixSiteLink();
+  else document.addEventListener("DOMContentLoaded", fixSiteLink);
+})();
+</script>
