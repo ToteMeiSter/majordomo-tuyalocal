@@ -8,6 +8,48 @@
   <a href="?view_mode=refresh" class="btn btn-default"><i class="glyphicon glyphicon-refresh"></i> Обновить</a>
  </form>
 
+ <div class="panel panel-info">
+  <div class="panel-heading"><b><i class="glyphicon glyphicon-cloud"></i> Tuya Cloud — авто-синхронизация устройств</b></div>
+  <div class="panel-body">
+   <form method="post" action="?" class="form-horizontal">
+    <input type="hidden" name="view_mode" value="cloud_settings"/>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Регион (Data Center)</label>
+     <div class="col-md-3">
+      <select name="cloud_region" class="form-control">
+       <option value="eu"[#if CLOUD_REGION="eu"#] selected[#endif#]>Central Europe (eu)</option>
+       <option value="us"[#if CLOUD_REGION="us"#] selected[#endif#]>Western America (us)</option>
+       <option value="cn"[#if CLOUD_REGION="cn"#] selected[#endif#]>China (cn)</option>
+       <option value="in"[#if CLOUD_REGION="in"#] selected[#endif#]>India (in)</option>
+      </select>
+     </div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Access ID / Client ID</label>
+     <div class="col-md-6"><input type="text" name="cloud_key" value="<#CLOUD_KEY#>" class="form-control" autocomplete="off" placeholder="из Tuya IoT Platform → Cloud → проект"/></div>
+    </div>
+    <div class="form-group">
+     <label class="col-md-3 control-label">Access Secret</label>
+     <div class="col-md-6">
+      <input type="password" name="cloud_secret" value="" class="form-control" autocomplete="off" placeholder="Access Secret (пусто = не менять)"/>
+      <span class="help-block"><small>
+       [#if CLOUD_HAS_SECRET="1"#]<span class="label label-success">Secret сохранён</span>[#else#]<span class="label label-default">Secret не задан</span>[#endif#]
+       Креды берутся в <b>iot.tuya.com</b> (Cloud → Development → ваш проект). Устройства привязываются через «Link Tuya App Account».
+      </small></span>
+     </div>
+    </div>
+    <div class="form-group">
+     <div class="col-md-offset-3 col-md-6">
+      <button type="submit" class="btn btn-primary">Сохранить креды</button>
+      <button type="button" class="btn btn-success" id="tuyaCloudSync"><i class="glyphicon glyphicon-refresh"></i> Синхронизировать из облака</button>
+      <span id="tuyaCloudResult" style="margin-left:10px;"></span>
+     </div>
+    </div>
+   </form>
+   <div class="help-block"><small>Синхронизация добавляет новые Tuya-устройства из облака (с local_key и LAN-IP из скана сети) и обновляет ключ/IP существующих. Zigbee-устройства за шлюзом пропускаются — они не управляются по локальному протоколу.</small></div>
+  </div>
+ </div>
+
  <div class="panel panel-default">
   <div class="panel-heading"><b>[#if EDITING="1"#]Редактирование устройства #<#F_ID#>[#else#]Добавить устройство Tuya[#endif#]</b></div>
   <div class="panel-body">
@@ -90,5 +132,31 @@
   }
   if (document.readyState !== "loading") fixSiteLink();
   else document.addEventListener("DOMContentLoaded", fixSiteLink);
+})();
+
+/* Кнопка «Синхронизировать из облака» — ajax op=cloud_sync */
+(function () {
+  function bind() {
+    var btn = document.getElementById("tuyaCloudSync");
+    var res = document.getElementById("tuyaCloudResult");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      res.innerHTML = '<span class="text-muted">Сканирую сеть и облако… (до ~20 сек)</span>';
+      fetch("?op=cloud_sync", { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          btn.disabled = false;
+          if (d.error) { res.innerHTML = '<span class="text-danger">Ошибка: ' + d.error + '</span>'; return; }
+          var msg = 'Добавлено: <b>' + (d.added || 0) + '</b>, обновлено: ' + (d.updated || 0) + ', пропущено: ' + (d.skipped || 0);
+          if (d.names && d.names.length) msg += ' — ' + d.names.join(", ");
+          res.innerHTML = '<span class="text-success">' + msg + '</span>';
+          if (d.added || d.updated) setTimeout(function () { location.href = "?"; }, 1800);
+        })
+        .catch(function (e) { btn.disabled = false; res.innerHTML = '<span class="text-danger">Сбой запроса: ' + e + '</span>'; });
+    });
+  }
+  if (document.readyState !== "loading") bind();
+  else document.addEventListener("DOMContentLoaded", bind);
 })();
 </script>

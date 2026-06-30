@@ -14,6 +14,7 @@ class tuyalocal extends module
 {
     var $PY     = '/opt/tuyaenv/bin/python';
     var $HELPER = '';
+    var $CLOUD  = '';
 
     function __construct()
     {
@@ -21,6 +22,7 @@ class tuyalocal extends module
         $this->title = "Tuya Local";
         $this->module_category = "<#LANG_SECTION_DEVICES#>";
         $this->HELPER = DIR_MODULES . $this->name . '/tuya_helper.py';
+        $this->CLOUD  = DIR_MODULES . $this->name . '/tuya_cloud.py';
         $this->checkInstalled();
         $this->getConfig();
     }
@@ -29,6 +31,9 @@ class tuyalocal extends module
     {
         parent::getConfig();
         if (!isset($this->config['API_POLL']) || !$this->config['API_POLL']) $this->config['API_POLL'] = 30;
+        if (!isset($this->config['CLOUD_REGION'])) $this->config['CLOUD_REGION'] = 'eu';
+        if (!isset($this->config['CLOUD_KEY']))    $this->config['CLOUD_KEY']    = '';
+        if (!isset($this->config['CLOUD_SECRET'])) $this->config['CLOUD_SECRET'] = '';
     }
 
     // -------------------------------------------------------------------------
@@ -48,6 +53,21 @@ class tuyalocal extends module
                 'sensor'       => array('dp'=>43,'type'=>'enum','scale'=>1, 'set'=>1,'obj'=>'thermostat',    'prop'=>'sensor',            'title'=>'Датчик','enum'=>array('in','out')),
                 'frost'        => array('dp'=>10,'type'=>'bool','scale'=>1, 'set'=>1,'obj'=>'relay:Антизаморозка','prop'=>'status',       'title'=>'Антизаморозка'),
                 'work'         => array('dp'=>36,'type'=>'str', 'scale'=>1, 'set'=>0,'obj'=>'thermostat',    'prop'=>'work_state',        'title'=>'Выход'),
+            );
+        }
+        if ($category == 'ggq') { // контроллер автополива (IIC-800-WIFI)
+            // obj='' — объекты MajorDoMo для полива не создаём (управление через дашборд/ops).
+            // Раскладка raw-DP (расписание dp38, ручной запуск dp45) — отдельными ops, см. ниже.
+            return array(
+                'operation_mode'  => array('dp'=>101,'type'=>'enum','scale'=>1,'set'=>1,'obj'=>'','prop'=>'mode',     'title'=>'Режим','enum'=>array('OFF','Manual','Auto')),
+                'irrigation_mode' => array('dp'=>44, 'type'=>'enum','scale'=>1,'set'=>1,'obj'=>'','prop'=>'order',    'title'=>'Порядок зон','enum'=>array('order','together')),
+                'season'          => array('dp'=>103,'type'=>'int', 'scale'=>1,'set'=>1,'obj'=>'','prop'=>'season',   'title'=>'Сезонная коррекция %','min'=>-90,'max'=>100),
+                'rain'            => array('dp'=>102,'type'=>'bool','scale'=>1,'set'=>1,'obj'=>'','prop'=>'rain',     'title'=>'Учитывать дождь'),
+                'schedule'        => array('dp'=>38, 'type'=>'str', 'scale'=>1,'set'=>0,'obj'=>'','prop'=>'schedule', 'title'=>'Расписание'),
+                'zonerun'         => array('dp'=>107,'type'=>'int', 'scale'=>1,'set'=>0,'obj'=>'','prop'=>'zonerun',  'title'=>'Работают зоны'),
+                'pending'         => array('dp'=>108,'type'=>'int', 'scale'=>1,'set'=>0,'obj'=>'','prop'=>'pending',  'title'=>'Очередь зон'),
+                'history'         => array('dp'=>104,'type'=>'int', 'scale'=>1,'set'=>0,'obj'=>'','prop'=>'history',  'title'=>'История полива'),
+                'clock_alarm'     => array('dp'=>106,'type'=>'bool','scale'=>1,'set'=>0,'obj'=>'','prop'=>'clock_alarm','title'=>'Сбой часов'),
             );
         }
         return array();
@@ -73,6 +93,58 @@ class tuyalocal extends module
     function devSet($d, $dp, $value, $type)
     {
         return $this->helperExec(array('set', $d['IP'], $d['DEV_ID'], $d['LOCAL_KEY'], $d['VERSION'], $dp, $value, $type));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tuya Cloud — авто-синхронизация устройств (getdevices + LAN-скан)
+    // -------------------------------------------------------------------------
+    function cloudList()
+    {
+        if (empty($this->config['CLOUD_KEY']) || empty($this->config['CLOUD_SECRET'])) {
+            return array('error' => 'Не заданы Access ID / Secret облака Tuya');
+        }
+        $cmd = escapeshellarg($this->PY) . ' ' . escapeshellarg($this->CLOUD) . ' list '
+            . escapeshellarg($this->config['CLOUD_REGION']) . ' '
+            . escapeshellarg($this->config['CLOUD_KEY']) . ' '
+            . escapeshellarg($this->config['CLOUD_SECRET']);
+        $out = shell_exec($cmd . ' 2>/dev/null');
+        $res = json_decode(trim((string)$out), true);
+        return is_array($res) ? $res : array('error' => 'нет ответа от облака');
+    }
+
+    // Синхронизация: добавляет новые устройства, обновляет ключ/IP существующих.
+    // Пропускает zigbee-подустройства за шлюзом (sub=true) — они не управляются локально.
+    function cloudSync()
+    {
+        $res = $this->cloudList();
+        if (!isset($res['devices'])) return array('error' => isset($res['error']) ? $res['error'] : 'нет ответа от облака');
+        $added = 0; $updated = 0; $skipped = 0; $names = array();
+        foreach ($res['devices'] as $d) {
+            if (!empty($d['sub']) || empty($d['id'])) { $skipped++; continue; }
+            $exist = SQLSelectOne("SELECT * FROM tuyadevices WHERE DEV_ID='" . DBSafe($d['id']) . "'");
+            $ip = !empty($d['ip_lan']) ? $d['ip_lan'] : (isset($exist['IP']) ? $exist['IP'] : '');
+            if (!empty($exist['ID'])) {
+                $rec = $exist;
+                if (!empty($d['local_key'])) $rec['LOCAL_KEY'] = $d['local_key'];
+                if ($ip) $rec['IP'] = $ip;
+                if (empty($rec['CATEGORY']) && !empty($d['category'])) $rec['CATEGORY'] = $d['category'];
+                SQLUpdate('tuyadevices', $rec);
+                $updated++;
+            } else {
+                $rec = array(
+                    'NAME'      => !empty($d['name']) ? $d['name'] : ('Tuya ' . substr((string)$d['id'], -6)),
+                    'DEV_ID'    => $d['id'],
+                    'LOCAL_KEY' => isset($d['local_key']) ? $d['local_key'] : '',
+                    'IP'        => $ip,
+                    'VERSION'   => !empty($d['version']) ? $d['version'] : '3.3',
+                    'CATEGORY'  => isset($d['category']) ? $d['category'] : '',
+                );
+                SQLInsert('tuyadevices', $rec);
+                $added++; $names[] = $rec['NAME'];
+            }
+        }
+        $this->log("cloudSync: +$added ~$updated skip=$skipped");
+        return array('ok' => 1, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'names' => $names);
     }
 
     // -------------------------------------------------------------------------
@@ -138,6 +210,9 @@ class tuyalocal extends module
         $did = (int)$device_db_id;
         $d = SQLSelectOne("SELECT * FROM tuyadevices WHERE ID=$did");
         if (!$d['ID']) return;
+        // Авто-создание объектов реализовано только для термостата (wk).
+        // Для полива (ggq) объекты не создаём — управление идёт через дашборд/ops.
+        if ($d['CATEGORY'] !== 'wk') return;
         $name = $d['NAME'];
         $map = $this->dpMap($d['CATEGORY']);
 
@@ -211,6 +286,96 @@ class tuyalocal extends module
         return $this->devSet($d, $m['dp'], $val, $type);
     }
 
+    // -------------------------------------------------------------------------
+    // IIC-800 (ggq): кодек расписания (dp38), ручной запуск (dp45), декод статуса
+    // Канал расписания = 20 байт (по даташиту dp38 normal_time):
+    //  [0]станция [1]длительность,мин(0=выкл) [2..13]6 окон старта(HH,MM; FFFF=пусто)
+    //  [14]цикл(0нед/1нечёт/2чёт/3интервал) [15]маска дней(bit0=Пн..bit6=Вс)
+    //  [16..18]дата старта интервала(DD,MM,YY) [19]учёт дождя(0/1)
+    // ВНИМАНИЕ: точные смещения подтверждаются образцом из приложения (validateSchedule).
+    // -------------------------------------------------------------------------
+    function irrDecodeSchedule($hex)
+    {
+        $bin = @hex2bin((string)$hex);
+        if ($bin === false || strlen($bin) < 20) return array();
+        $n = intdiv(strlen($bin), 20);
+        $out = array();
+        for ($i = 0; $i < $n; $i++) {
+            $u = array_values(unpack('C20', substr($bin, $i * 20, 20)));
+            $starts = array();
+            for ($k = 0; $k < 6; $k++) {
+                $hh = $u[2 + 2 * $k]; $mm = $u[3 + 2 * $k];
+                if ((($hh << 8) | $mm) != 0xFFFF) $starts[] = sprintf('%02d:%02d', $hh, $mm);
+            }
+            $out[] = array(
+                'station'  => $u[0], 'duration' => $u[1], 'enabled' => $u[1] > 0 ? 1 : 0,
+                'starts'   => $starts, 'cycle' => $u[14], 'weekdays' => $u[15],
+                'interval' => array($u[16], $u[17], $u[18]), 'rain' => $u[19],
+                'raw'      => strtoupper(bin2hex(substr($bin, $i * 20, 20))),
+            );
+        }
+        return $out;
+    }
+
+    function irrEncodeSchedule($channels)
+    {
+        $bin = '';
+        foreach ((array)$channels as $c) {
+            $b = array_fill(0, 20, 0);
+            $b[0] = (int)(isset($c['station']) ? $c['station'] : 0);
+            $b[1] = max(0, min(255, (int)(isset($c['duration']) ? $c['duration'] : 0)));
+            for ($k = 0; $k < 6; $k++) { $b[2 + 2 * $k] = 0xFF; $b[3 + 2 * $k] = 0xFF; }
+            $sk = 0;
+            foreach ((array)(isset($c['starts']) ? $c['starts'] : array()) as $s) {
+                if ($sk >= 6) break;
+                $p = explode(':', (string)$s);
+                if (count($p) != 2) continue;
+                $b[2 + 2 * $sk] = max(0, min(23, (int)$p[0]));
+                $b[3 + 2 * $sk] = max(0, min(59, (int)$p[1]));
+                $sk++;
+            }
+            $b[14] = (int)(isset($c['cycle']) ? $c['cycle'] : 0) & 0x03;
+            $b[15] = (int)(isset($c['weekdays']) ? $c['weekdays'] : 0) & 0xFF;
+            $iv = (array)(isset($c['interval']) ? $c['interval'] : array(0, 0, 0));
+            $b[16] = (int)(isset($iv[0]) ? $iv[0] : 0);
+            $b[17] = (int)(isset($iv[1]) ? $iv[1] : 0);
+            $b[18] = (int)(isset($iv[2]) ? $iv[2] : 0);
+            $b[19] = (isset($c['rain']) && $c['rain']) ? 1 : 0;
+            foreach ($b as $x) $bin .= chr($x & 0xFF);
+        }
+        return strtoupper(bin2hex($bin));
+    }
+
+    // dp45 (raw, 34 байта): ручной запуск/сброс. $zones = array(станция => минуты)
+    function irrManualPayload($zones, $reset = false)
+    {
+        $b = array_fill(0, 34, 0);
+        $b[0] = 1; // 1 = старт/сброс ручного полива
+        if (!$reset) {
+            $b[1] = 1; // 1 = конкретные станции
+            foreach ((array)$zones as $z => $min) {
+                $z = (int)$z; $min = max(0, min(0xFFFF, (int)$min));
+                if ($z < 1 || $z > 8) continue;
+                $idx = 2 + ($z - 1) * 2;
+                $b[$idx] = ($min >> 8) & 0xFF; $b[$idx + 1] = $min & 0xFF;
+            }
+        }
+        $s = ''; foreach ($b as $x) $s .= chr($x & 0xFF);
+        return strtoupper(bin2hex($s));
+    }
+
+    function irrDecodeStatus($dps)
+    {
+        $g = function ($dp, $def = null) use ($dps) { return array_key_exists((string)$dp, $dps) ? $dps[(string)$dp] : $def; };
+        $h = (int)$g(104, 0); $hb = array(($h >> 24) & 0xFF, ($h >> 16) & 0xFF, ($h >> 8) & 0xFF, $h & 0xFF);
+        return array(
+            'mode' => $g(101), 'order' => $g(44), 'season' => (int)$g(103, 0), 'rain' => $g(102) ? 1 : 0,
+            'zonerun' => (int)$g(107, 0), 'pending' => (int)$g(108, 0), 'clock_err' => $g(106) ? 1 : 0,
+            'history' => array('total_min' => ($hb[0] << 8) | $hb[1], 'channel' => $hb[2], 'manual' => ($hb[3] >> 4) & 0x0F, 'valves' => $hb[3] & 0x0F),
+            'schedule' => $this->irrDecodeSchedule((string)$g(38, '')),
+        );
+    }
+
     function processCycle()
     {
         $this->getConfig();
@@ -278,10 +443,72 @@ class tuyalocal extends module
             echo json_encode(array('devices' => $res), JSON_UNESCAPED_UNICODE);
             exit;
         }
+        // Авто-синхронизация устройств из облака Tuya (ajax)
+        if (gr('op') == 'cloud_sync') {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode($this->cloudSync(), JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        // ----- IIC-800 (ggq): управление поливом -----
+        if (in_array(gr('op'), array('irr_status', 'irr_manual', 'irr_stop', 'irr_sched'), true)) {
+            header('Content-Type: application/json; charset=utf-8');
+            $id = (int)gr('id');
+            $d = SQLSelectOne("SELECT * FROM tuyadevices WHERE ID=$id AND CATEGORY='ggq'");
+            if (!$d['ID']) { echo json_encode(array('ok' => 0, 'error' => 'no ggq device')); exit; }
+
+            if (gr('op') == 'irr_status') {
+                $st = $this->devStatus($d);
+                $dps = ($st && isset($st['dps']) && is_array($st['dps'])) ? $st['dps'] : null;
+                echo json_encode(array('ok' => $dps ? 1 : 0, 'id' => $id, 'state' => $dps ? $this->irrDecodeStatus($dps) : null), JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            if (gr('op') == 'irr_stop') {
+                $r = $this->devSet($d, 45, $this->irrManualPayload(array(), true), 'raw');
+                $this->writeDeviceCommand($id, 'operation_mode', 'OFF');
+                echo json_encode(array('ok' => ($r && isset($r['dps'])) ? 1 : 0), JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            if (gr('op') == 'irr_manual') {
+                // zones=1:10,3:5 (станция:минуты)
+                $zones = array();
+                foreach (explode(',', gr('zones')) as $pair) {
+                    $pp = explode(':', trim($pair));
+                    if (count($pp) == 2 && (int)$pp[0] > 0) $zones[(int)$pp[0]] = (int)$pp[1];
+                }
+                if (!$zones) { echo json_encode(array('ok' => 0, 'error' => 'no zones')); exit; }
+                $this->writeDeviceCommand($id, 'operation_mode', 'Manual');
+                $r = $this->devSet($d, 45, $this->irrManualPayload($zones, false), 'raw');
+                echo json_encode(array('ok' => ($r && isset($r['dps'])) ? 1 : 0, 'zones' => $zones), JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+            if (gr('op') == 'irr_sched') {
+                // data=JSON-массив каналов, либо hex= напрямую (безопасный/отладочный путь)
+                $hex = trim(gr('hex'));
+                if ($hex === '') {
+                    $ch = json_decode(gr('data'), true);
+                    if (!is_array($ch)) { echo json_encode(array('ok' => 0, 'error' => 'bad data')); exit; }
+                    $hex = $this->irrEncodeSchedule($ch);
+                }
+                $hex = preg_replace('/[^0-9A-Fa-f]/', '', $hex);
+                if (strlen($hex) < 40 || strlen($hex) % 40 != 0) { echo json_encode(array('ok' => 0, 'error' => 'bad hex len')); exit; }
+                $r = $this->devSet($d, 38, $hex, 'str');
+                echo json_encode(array('ok' => ($r && isset($r['dps'])) ? 1 : 0, 'hex' => $hex), JSON_UNESCAPED_UNICODE);
+                exit;
+            }
+        }
         if ($this->view_mode == 'refresh') { $this->refreshDevices(); $this->redirect("?"); }
         if ($this->view_mode == 'update_settings') {
             $poll = (int)gr('api_poll', 'int');
             if ($poll >= 10) $this->config['API_POLL'] = $poll;
+            $this->saveConfig();
+            $this->redirect("?");
+        }
+        // Сохранение кредов Tuya Cloud (для авто-синхронизации)
+        if ($this->view_mode == 'cloud_settings') {
+            $this->config['CLOUD_REGION'] = preg_replace('/[^a-z]/', '', strtolower(trim(gr('cloud_region'))));
+            $this->config['CLOUD_KEY']    = preg_replace('/[^A-Za-z0-9]/', '', trim(gr('cloud_key')));
+            $cs = trim(gr('cloud_secret'));
+            if ($cs !== '') $this->config['CLOUD_SECRET'] = preg_replace('/[^A-Za-z0-9]/', '', $cs); // пустое поле = не менять
             $this->saveConfig();
             $this->redirect("?");
         }
@@ -311,6 +538,9 @@ class tuyalocal extends module
             $this->redirect("?");
         }
         $out['API_POLL'] = $this->config['API_POLL'];
+        $out['CLOUD_REGION'] = htmlspecialchars($this->config['CLOUD_REGION']);
+        $out['CLOUD_KEY']    = htmlspecialchars($this->config['CLOUD_KEY']);
+        $out['CLOUD_HAS_SECRET'] = !empty($this->config['CLOUD_SECRET']) ? 1 : 0;
         $out['DEVICES'] = SQLSelect("SELECT ID,NAME,CATEGORY,IP,DEV_ID,VERSION FROM tuyadevices ORDER BY NAME");
         $out['DEVICES_COUNT'] = count($out['DEVICES']);
         // префилл формы (режим редактирования при ?edit=ID)
